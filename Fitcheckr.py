@@ -171,38 +171,134 @@ st.markdown("""
 
 class ResumeEditor:
     def __init__(self):
-        self.data_dir = "_data"
+        self.sections = [
+            "Personal Information",
+            "Experience",
+            "Education",
+            "Projects"
+        ]
         self.files = {
             "Personal Information": "personal.json",
-            "Experience": "exp.json", 
+            "Experience": "exp.json",
             "Education": "edu.json",
             "Projects": "proj.json"
         }
         
-    def load_json(self, filename: str) -> List[Dict]:
-        """Load JSON data from file"""
-        filepath = os.path.join(self.data_dir, filename)
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            st.error(f"File {filename} not found!")
-            return []
-        except json.JSONDecodeError:
-            st.error(f"Invalid JSON in {filename}")
-            return []
-    
-    def save_json(self, filename: str, data: List[Dict]) -> bool:
-        """Save JSON data to file"""
-        filepath = os.path.join(self.data_dir, filename)
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            return True
-        except Exception as e:
-            st.error(f"Error saving {filename}: {str(e)}")
-            return False
-    
+    def load_json_from_session(self, section: str) -> List[Dict]:
+        key = f"{section.lower().replace(' ', '_')}_data"
+        return st.session_state.get(key, [])
+
+    def save_json_to_session(self, section: str, data: List[Dict]):
+        key = f"{section.lower().replace(' ', '_')}_data"
+        st.session_state[key] = data
+
+    def export_json(self, section: str):
+        data = self.load_json_from_session(section)
+        json_str = json.dumps(data, indent=2, ensure_ascii=False)
+        st.download_button(
+            label=f"Export {section} as JSON",
+            data=json_str,
+            file_name=self.files[section],
+            mime="application/json"
+        )
+
+    def upload_page(self):
+        st.markdown('<h2 class="section-header">⬆️ Upload Resume Data (JSON)</h2>', unsafe_allow_html=True)
+        
+        # Upload option selection
+        upload_option = st.radio(
+            "Choose upload method:",
+            ["Upload Combined Resume JSON", "Upload Individual Section JSONs"],
+            help="Select whether to upload a single combined resume file or individual section files"
+        )
+        
+        if upload_option == "Upload Combined Resume JSON":
+            st.subheader("Upload Combined Resume JSON")
+            st.info("Upload a single JSON file containing all sections (personal, experience, education, projects)")
+            
+            combined_file = st.file_uploader(
+                "Upload combined resume JSON file", 
+                type=["json"], 
+                key="upload_combined",
+                help="JSON file should have keys: personal, experience, education, projects"
+            )
+            
+            if combined_file:
+                try:
+                    combined_data = json.load(combined_file)
+                    if not isinstance(combined_data, dict):
+                        st.error("Combined JSON must be an object with section keys.")
+                    else:
+                        # Extract and save each section
+                        sections_uploaded = []
+                        for section in self.sections:
+                            section_key = section.lower().replace(' ', '_')
+                            # Special handling for Personal Information: support both 'personal' and 'personal_information'
+                            if section == "Personal Information":
+                                personal_data = None
+                                if "personal_information" in combined_data:
+                                    personal_data = combined_data["personal_information"]
+                                elif "personal" in combined_data:
+                                    personal_data = combined_data["personal"]
+                                if personal_data is not None:
+                                    self.save_json_to_session(section, personal_data)
+                                    sections_uploaded.append(section)
+                            else:
+                                if section_key in combined_data:
+                                    self.save_json_to_session(section, combined_data[section_key])
+                                    sections_uploaded.append(section)
+                        
+                        if sections_uploaded:
+                            st.success(f"✅ Successfully uploaded sections: {', '.join(sections_uploaded)}")
+                        else:
+                            st.warning("No valid sections found in the combined JSON file.")
+                            
+                except Exception as e:
+                    st.error(f"Error reading combined JSON: {str(e)}")
+        
+        else:  # Upload Individual Section JSONs
+            st.subheader("Upload Individual Section JSONs")
+            st.info("Upload JSON files for each section separately")
+            
+            for section in self.sections:
+                st.write(f"**{section}**")
+                uploaded_file = st.file_uploader(
+                    f"Upload {section} JSON file", 
+                    type=["json"], 
+                    key=f"upload_{section}",
+                    help=f"Upload JSON file for {section} section"
+                )
+                
+                if uploaded_file:
+                    try:
+                        data = json.load(uploaded_file)
+                        if not isinstance(data, list):
+                            st.error(f"{section} JSON must be a list of objects.")
+                        else:
+                            self.save_json_to_session(section, data)
+                            st.success(f"✅ {section} data uploaded successfully!")
+                    except Exception as e:
+                        st.error(f"Error reading {section} JSON: {str(e)}")
+        
+        # Show current session state summary
+        st.markdown("---")
+        st.subheader("📊 Current Data Summary")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            for section in self.sections[:2]:
+                data = self.load_json_from_session(section)
+                count = len(data) if isinstance(data, list) else 0
+                st.write(f"**{section}:** {count} item(s)")
+        
+        with col2:
+            for section in self.sections[2:]:
+                data = self.load_json_from_session(section)
+                count = len(data) if isinstance(data, list) else 0
+                st.write(f"**{section}:** {count} item(s)")
+        
+        st.info("Uploaded data will be available for manual editing and ATS analysis.")
+
     def extract_keywords(self, text: str) -> List[str]:
         """Extract keywords from text"""
         if not text:
@@ -277,7 +373,7 @@ class ResumeEditor:
         text_parts = []
         
         # Personal info
-        personal_data = self.load_json("personal.json")
+        personal_data = self.load_json_from_session("Personal Information")
         if personal_data:
             personal = personal_data[0]
             text_parts.append(f"{personal.get('name', '')} {personal.get('email', '')}")
@@ -295,19 +391,19 @@ class ResumeEditor:
             text_parts.append(' '.join(certifications))
         
         # Experience
-        exp_data = self.load_json("exp.json")
+        exp_data = self.load_json_from_session("Experience")
         for exp in exp_data:
             text_parts.append(f"{exp.get('role', '')} {exp.get('company', '')}")
             for detail in exp.get('details', []):
                 text_parts.append(f"{detail.get('title', '')} {detail.get('description', '')}")
         
         # Education
-        edu_data = self.load_json("edu.json")
+        edu_data = self.load_json_from_session("Education")
         for edu in edu_data:
             text_parts.append(f"{edu.get('degree', '')} {edu.get('school', '')}")
         
         # Projects
-        proj_data = self.load_json("proj.json")
+        proj_data = self.load_json_from_session("Projects")
         for proj in proj_data:
             text_parts.append(f"{proj.get('title', '')} {proj.get('description', '')}")
         
@@ -321,10 +417,12 @@ class ResumeEditor:
         st.sidebar.title("Navigation")
         page = st.sidebar.selectbox(
             "Choose a section:",
-            ["ATS Score Analyzer", "Personal Information", "Experience", "Education", "Projects"]
+            ["Upload Data"] + ["ATS Score Analyzer"] + self.sections
         )
         
-        if page == "ATS Score Analyzer":
+        if page == "Upload Data":
+            self.upload_page()
+        elif page == "ATS Score Analyzer":
             self.ats_analyzer_page()
         else:
             self.form_editor_page(page)
@@ -332,6 +430,21 @@ class ResumeEditor:
     def ats_analyzer_page(self):
         """ATS Score Analyzer page"""
         st.markdown('<h2 class="section-header">🎯 ATS Score Analyzer</h2>', unsafe_allow_html=True)
+        
+        # Export full JSON data button
+        if st.button("Export Full Resume JSON"):
+            combined_data = {
+                "personal_information": self.load_json_from_session("Personal Information"),
+                "experience": self.load_json_from_session("Experience"),
+                "education": self.load_json_from_session("Education"),
+                "projects": self.load_json_from_session("Projects")
+            }
+            st.download_button(
+                label="Download Combined Resume JSON",
+                data=json.dumps(combined_data, indent=2, ensure_ascii=False),
+                file_name="combined_resume.json",
+                mime="application/json"
+            )
         
         col1, col2 = st.columns([1, 1])
         
@@ -500,14 +613,13 @@ class ResumeEditor:
         """Form-based editor page for each section"""
         st.markdown(f'<h2 class="section-header">✏️ {section_name} Editor</h2>', unsafe_allow_html=True)
         
-        filename = self.files[section_name]
-        data = self.load_json(filename)
+        data = self.load_json_from_session(section_name)
         
         # Debug information
-        st.write(f"Debug: Loaded {len(data) if isinstance(data, list) else 'invalid'} items from {filename}")
+        st.write(f"Debug: Loaded {len(data) if isinstance(data, list) else 'invalid'} items from session for {section_name}")
         
         if not data:
-            st.info(f"No data found in {filename}. You can start adding your information below.")
+            st.info(f"No data found for {section_name}. You can start adding your information below.")
         
         # There are no stray st.text_input or st.text_area calls with empty labels here.
         # All input fields are inside the respective edit_* functions and have proper labels.
@@ -515,13 +627,14 @@ class ResumeEditor:
         
         # Form-based editing based on section
         if section_name == "Personal Information":
-            self.edit_personal_info(data, filename)
+            self.edit_personal_info(data, section_name)
         elif section_name == "Experience":
-            self.edit_experience(data, filename)
+            self.edit_experience(data, section_name)
         elif section_name == "Education":
-            self.edit_education(data, filename)
+            self.edit_education(data, section_name)
         elif section_name == "Projects":
-            self.edit_projects(data, filename)
+            self.edit_projects(data, section_name)
+        self.export_json(section_name)
     
     def edit_personal_info(self, data: List[Dict], filename: str):
         """Edit personal information with forms"""
@@ -560,11 +673,12 @@ class ResumeEditor:
         
         st.write("Languages:")
         
+        # Initialize remove_lang_idx to avoid UnboundLocalError
+        remove_lang_idx = None
         # Display languages as chips with clickable remove
         if languages:
             # Create columns for chips (3 chips per row)
             chip_cols = st.columns(3)
-            remove_lang_idx = None
             
             for i, lang in enumerate(languages):
                 if isinstance(lang, dict) and lang.get('language', '').strip():
@@ -623,11 +737,12 @@ class ResumeEditor:
         
         st.write("Technologies:")
         
+        # Initialize remove_tech_idx to avoid UnboundLocalError
+        remove_tech_idx = None
         # Display technologies as chips with clickable remove
         if technologies:
             # Create columns for chips (3 chips per row)
             tech_chip_cols = st.columns(3)
-            remove_tech_idx = None
             
             for i, tech in enumerate(technologies):
                 if isinstance(tech, dict) and tech.get('technology', '').strip():
@@ -686,11 +801,12 @@ class ResumeEditor:
         if not isinstance(certifications, list):
             certifications = []
         
+        # Initialize remove_cert_idx to avoid UnboundLocalError
+        remove_cert_idx = None
         # Display certifications as chips with clickable remove
         if certifications:
             # Create columns for chips (3 chips per row)
             cert_chip_cols = st.columns(3)
-            remove_cert_idx = None
             
             for i, cert in enumerate(certifications):
                 if isinstance(cert, dict) and cert.get('certification', '').strip():
@@ -743,33 +859,29 @@ class ResumeEditor:
                 st.rerun()
         
         # Save button
-        if st.button("Save Personal Information", type="primary"):
-            # Filter out empty entries
-            new_languages = [lang for lang in languages if lang.get('language', '').strip()]
-            new_technologies = [tech for tech in technologies if tech.get('technology', '').strip()]
-            new_certifications = [cert for cert in certifications if cert.get('certification', '').strip()]
-            
-            updated_data = [{
-                "name": name,
-                "email": email,
-                "phone": phone,
-                "website": website,
-                "linkedin": linkedin,
-                "languages": new_languages,
-                "technologies": new_technologies,
-                "certifications": new_certifications
-            }]
-            
-            if self.save_json(filename, updated_data):
-                st.success("✅ Personal information saved successfully!")
-                # Clear session state after successful save
-                if 'languages' in st.session_state:
-                    del st.session_state['languages']
-                if 'technologies' in st.session_state:
-                    del st.session_state['technologies']
-                if 'certifications' in st.session_state:
-                    del st.session_state['certifications']
-                st.rerun()
+        # (Remove the following block for Personal Information)
+        # if st.button("Save Personal Information", type="primary"):
+        #     # Filter out empty entries
+        #     new_languages = [lang for lang in languages if lang.get('language', '').strip()]
+        #     new_technologies = [tech for tech in technologies if tech.get('technology', '').strip()]
+        #     new_certifications = [cert for cert in certifications if cert.get('certification', '').strip()]
+        #     updated_data = [{
+        #         "name": name,
+        #         "email": email,
+        #         "phone": phone,
+        #         "website": website,
+        #         "linkedin": linkedin,
+        #         "languages": new_languages,
+        #         "technologies": new_technologies,
+        #         "certifications": new_certifications
+        #     }]
+        #     self.save_json_to_session(filename, updated_data)
+        #     st.success("✅ Personal information saved successfully!")
+        #     # After saving, update session state lists from saved data
+        #     st.session_state['languages'] = new_languages
+        #     st.session_state['technologies'] = new_technologies
+        #     st.session_state['certifications'] = new_certifications
+        #     st.rerun()
     
     def edit_experience(self, data: List[Dict], filename: str):
         """Edit experience with forms"""
@@ -883,34 +995,35 @@ class ResumeEditor:
             st.rerun()
         
         # Save button
-        if st.button("Save Experience", type="primary"):
-            # Filter out empty experiences and details
-            valid_experiences = []
-            for exp in experiences:
-                if exp.get('company', '').strip() or exp.get('role', '').strip():
-                    # Filter out empty details
-                    valid_details = []
-                    for detail in exp.get('details', []):
-                        if detail.get('title', '').strip() and detail.get('description', '').strip():
-                            valid_details.append(detail)
+        # (Remove the following block for Experience)
+        # if st.button("Save Experience", type="primary"):
+        #     # Filter out empty experiences and details
+        #     valid_experiences = []
+        #     for exp in experiences:
+        #         if exp.get('company', '').strip() or exp.get('role', '').strip():
+        #             # Filter out empty details
+        #             valid_details = []
+        #             for detail in exp.get('details', []):
+        #                 if detail.get('title', '').strip() and detail.get('description', '').strip():
+        #                     valid_details.append(detail)
                     
-                    # Create experience with filtered details
-                    valid_exp = {
-                        "company": exp.get('company', ''),
-                        "company_location": exp.get('company_location', ''),
-                        "role": exp.get('role', ''),
-                        "team": exp.get('team', ''),
-                        "time_duration": exp.get('time_duration', ''),
-                        "details": valid_details
-                    }
-                    valid_experiences.append(valid_exp)
+        #             # Create experience with filtered details
+        #             valid_exp = {
+        #                 "company": exp.get('company', ''),
+        #                 "company_location": exp.get('company_location', ''),
+        #                 "role": exp.get('role', ''),
+        #                 "team": exp.get('team', ''),
+        #                 "time_duration": exp.get('time_duration', ''),
+        #                 "details": valid_details
+        #             }
+        #             valid_experiences.append(valid_exp)
             
-            if self.save_json(filename, valid_experiences):
-                st.success("✅ Experience saved successfully!")
-                # Clear session state after successful save
-                if 'experiences' in st.session_state:
-                    del st.session_state['experiences']
-                st.rerun()
+        #     self.save_json_to_session(filename, valid_experiences)
+        #     st.success("✅ Experience saved successfully!")
+        #     # Clear session state after successful save
+        #     if 'experiences' in st.session_state:
+        #         del st.session_state['experiences']
+        #     st.rerun()
     
     def edit_education(self, data: List[Dict], filename: str):
         """Edit education with forms"""
@@ -976,19 +1089,20 @@ class ResumeEditor:
             st.rerun()
         
         # Save button
-        if st.button("Save Education", type="primary"):
-            # Filter out empty education entries
-            valid_education = []
-            for edu in education:
-                if edu.get('school', '').strip() or edu.get('degree', '').strip():
-                    valid_education.append(edu)
+        # (Remove the following block for Education)
+        # if st.button("Save Education", type="primary"):
+        #     # Filter out empty education entries
+        #     valid_education = []
+        #     for edu in education:
+        #         if edu.get('school', '').strip() or edu.get('degree', '').strip():
+        #             valid_education.append(edu)
             
-            if self.save_json(filename, valid_education):
-                st.success("✅ Education saved successfully!")
-                # Clear session state after successful save
-                if 'education' in st.session_state:
-                    del st.session_state['education']
-                st.rerun()
+        #     self.save_json_to_session(filename, valid_education)
+        #     st.success("✅ Education saved successfully!")
+        #     # Clear session state after successful save
+        #     if 'education' in st.session_state:
+        #         del st.session_state['education']
+        #     st.rerun()
     
     def edit_projects(self, data: List[Dict], filename: str):
         """Edit projects with forms"""
@@ -1042,19 +1156,20 @@ class ResumeEditor:
             st.rerun()
         
         # Save button
-        if st.button("Save Projects", type="primary"):
-            # Filter out empty project entries
-            valid_projects = []
-            for proj in projects:
-                if proj.get('title', '').strip() or proj.get('description', '').strip():
-                    valid_projects.append(proj)
+        # (Remove the following block for Projects)
+        # if st.button("Save Projects", type="primary"):
+        #     # Filter out empty project entries
+        #     valid_projects = []
+        #     for proj in projects:
+        #         if proj.get('title', '').strip() or proj.get('description', '').strip():
+        #             valid_projects.append(proj)
             
-            if self.save_json(filename, valid_projects):
-                st.success("✅ Projects saved successfully!")
-                # Clear session state after successful save
-                if 'projects' in st.session_state:
-                    del st.session_state['projects']
-                st.rerun()
+        #     self.save_json_to_session(filename, valid_projects)
+        #     st.success("✅ Projects saved successfully!")
+        #     # Clear session state after successful save
+        #     if 'projects' in st.session_state:
+        #         del st.session_state['projects']
+        #     st.rerun()
     
 
     

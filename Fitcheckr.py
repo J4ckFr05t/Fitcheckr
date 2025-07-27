@@ -1,12 +1,14 @@
 import streamlit as st
 import json
-import os
 from typing import Dict, List, Any
 import re
 from collections import Counter
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import spacy
+from sklearn.feature_extraction.text import TfidfVectorizer
+import en_core_web_sm
 
 # Page configuration
 st.set_page_config(
@@ -183,7 +185,9 @@ class ResumeEditor:
             "Education": "edu.json",
             "Projects": "proj.json"
         }
-        
+
+        self.nlp = en_core_web_sm.load()   
+    
     def load_json_from_session(self, section: str) -> List[Dict]:
         key = f"{section.lower().replace(' ', '_')}_data"
         return st.session_state.get(key, [])
@@ -299,75 +303,50 @@ class ResumeEditor:
         
         st.info("Uploaded data will be available for manual editing and ATS analysis.")
 
-    def extract_keywords(self, text: str) -> List[str]:
-        """Extract keywords from text"""
-        if not text:
-            return []
-        
-        # Remove special characters and convert to lowercase
-        text = re.sub(r'[^\w\s]', ' ', text.lower())
-        words = text.split()
-        
-        # Filter out common stop words
-        stop_words = {
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
-            'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-            'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-            'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those',
-            'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us',
-            'them', 'my', 'your', 'his', 'her', 'its', 'our', 'their', 'mine',
-            'yours', 'his', 'hers', 'ours', 'theirs', 'am', 'is', 'are', 'was',
-            'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does',
-            'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can'
-        }
-        
-        keywords = [word for word in words if word not in stop_words and len(word) > 2]
-        return keywords
-    
-    def calculate_ats_score(self, resume_text: str, job_description: str) -> Dict[str, Any]:
-        """Calculate ATS score based on keyword matching"""
+    def extract_keywords(self, text):
+        doc = self.nlp(text.lower())
+        keywords = set()
+
+        for chunk in doc.noun_chunks:
+            cleaned = chunk.text.strip().lower()
+            if len(cleaned) > 2:
+                keywords.add(cleaned)
+
+        for ent in doc.ents:
+            if ent.label_ in {"ORG", "PRODUCT", "GPE", "PERSON"}:
+                keywords.add(ent.text.strip().lower())
+
+        return list(keywords)
+
+    def get_tfidf_keywords(self, resume_text, jd_text, top_n=30):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        vec = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=300)
+        tfidf_matrix = vec.fit_transform([resume_text, jd_text])
+        feature_names = vec.get_feature_names_out()
+        scores = tfidf_matrix[1].toarray().flatten()
+        top_indices = scores.argsort()[::-1][:top_n]
+        return [feature_names[i] for i in top_indices]
+
+    def calculate_ats_score(self, resume_text, jd_text):
+        jd_keywords = self.get_tfidf_keywords(resume_text, jd_text)
         resume_keywords = self.extract_keywords(resume_text)
-        job_keywords = self.extract_keywords(job_description)
-        
-        if not job_keywords:
-            return {
-                'score': 0,
-                'matched_keywords': [],
-                'missing_keywords': job_keywords,
-                'match_percentage': 0
-            }
-        
-        # Count keyword frequencies
-        resume_keyword_counts = Counter(resume_keywords)
-        job_keyword_counts = Counter(job_keywords)
-        
-        # Find matched and missing keywords
-        matched_keywords = []
-        missing_keywords = []
-        
-        for keyword, count in job_keyword_counts.items():
-            if keyword in resume_keyword_counts:
-                matched_keywords.extend([keyword] * min(count, resume_keyword_counts[keyword]))
-            else:
-                missing_keywords.extend([keyword] * count)
-        
-        # Calculate score
-        total_job_keywords = len(job_keywords)
-        matched_count = len(matched_keywords)
-        match_percentage = (matched_count / total_job_keywords) * 100
-        
-        # Score calculation (0-100)
-        score = min(100, match_percentage)
-        
+
+        matched = [kw for kw in jd_keywords if any(rk in kw for rk in resume_keywords)]
+        missing = [kw for kw in jd_keywords if kw not in matched]
+
+        total = len(jd_keywords)
+        matched_count = len(matched)
+        match_percent = (matched_count / total) * 100 if total else 0
+
         return {
-            'score': round(score, 1),
-            'matched_keywords': list(set(matched_keywords)),
-            'missing_keywords': list(set(missing_keywords)),
-            'match_percentage': round(match_percentage, 1),
-            'total_job_keywords': total_job_keywords,
-            'matched_count': matched_count
+            "score": round(match_percent, 1),
+            "matched_keywords": matched,
+            "missing_keywords": missing,
+            "match_percentage": round(match_percent, 1),
+            "total_keywords": total,
+            "matched_count": matched_count
         }
-    
+
     def get_resume_text(self) -> str:
         """Extract all text from resume data"""
         text_parts = []
@@ -1170,8 +1149,6 @@ class ResumeEditor:
         #     if 'projects' in st.session_state:
         #         del st.session_state['projects']
         #     st.rerun()
-    
-
     
     def display_formatted_data(self, section_name: str, data: List[Dict]):
         """Display formatted data based on section"""

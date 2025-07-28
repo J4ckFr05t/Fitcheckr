@@ -8,6 +8,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer, util
+import math
+import numpy as np
 import en_core_web_sm
 
 # Page configuration
@@ -186,7 +189,8 @@ class ResumeEditor:
             "Projects": "proj.json"
         }
 
-        self.nlp = en_core_web_sm.load()   
+        self.nlp = en_core_web_sm.load()
+        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
     
     def load_json_from_session(self, section: str) -> List[Dict]:
         key = f"{section.lower().replace(' ', '_')}_data"
@@ -308,9 +312,9 @@ class ResumeEditor:
         keywords = set()
 
         for chunk in doc.noun_chunks:
-            cleaned = chunk.text.strip().lower()
-            if len(cleaned) > 2:
-                keywords.add(cleaned)
+            tok = chunk.root
+            if tok.pos_ in {"NOUN", "PROPN"} and len(chunk.text.strip()) > 2:
+                keywords.add(chunk.text.strip().lower())
 
         for ent in doc.ents:
             if ent.label_ in {"ORG", "PRODUCT", "GPE", "PERSON"}:
@@ -318,35 +322,47 @@ class ResumeEditor:
 
         return list(keywords)
 
-    def get_tfidf_keywords(self, resume_text, jd_text, top_n=30):
-        from sklearn.feature_extraction.text import TfidfVectorizer
+    def get_tfidf_keywords(self, jd_text, top_n=30):
         vec = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=300)
-        tfidf_matrix = vec.fit_transform([resume_text, jd_text])
+        tfidf_matrix = vec.fit_transform([jd_text])
         feature_names = vec.get_feature_names_out()
-        scores = tfidf_matrix[1].toarray().flatten()
+        scores = tfidf_matrix.toarray().flatten()
         top_indices = scores.argsort()[::-1][:top_n]
-        return [feature_names[i] for i in top_indices]
+        return [(feature_names[i], scores[i]) for i in top_indices]
 
-    def calculate_ats_score(self, resume_text, jd_text):
-        jd_keywords = self.get_tfidf_keywords(resume_text, jd_text)
+    def calculate_ats_score(self, resume_text, jd_text, threshold=0.75):
+        jd_keywords_weighted = self.get_tfidf_keywords(jd_text)
         resume_keywords = self.extract_keywords(resume_text)
+        resume_emb = self.embedder.encode(resume_keywords, convert_to_tensor=True)
 
-        matched = [kw for kw in jd_keywords if any(rk in kw for rk in resume_keywords)]
-        missing = [kw for kw in jd_keywords if kw not in matched]
+        matched = []
+        missing = []
 
-        total = len(jd_keywords)
-        matched_count = len(matched)
-        match_percent = (matched_count / total) * 100 if total else 0
+        for keyword, weight in jd_keywords_weighted:
+            kw_emb = self.embedder.encode(keyword, convert_to_tensor=True)
+            cos_scores = util.cos_sim(kw_emb, resume_emb)
+            max_score = cos_scores.max().item()  # ✅
+
+
+            if max_score >= threshold:
+                matched.append({"keyword": keyword, "score": round(max_score, 2), "weight": round(weight, 2)})
+            else:
+                missing.append({"keyword": keyword, "score": round(max_score, 2), "weight": round(weight, 2)})
+
+        total_weight = sum(weight for _, weight in jd_keywords_weighted)
+        matched_weight = sum(m['weight'] for m in matched)
+
+        score = (matched_weight / total_weight * 100) if total_weight else 0
 
         return {
-            "score": round(match_percent, 1),
+            "score": round(score, 1),
             "matched_keywords": matched,
             "missing_keywords": missing,
-            "match_percentage": round(match_percent, 1),
-            "total_keywords": total,
-            "matched_count": matched_count
+            "match_percentage": round(score, 1),
+            "total_keywords": len(jd_keywords_weighted),
+            "matched_count": len(matched)
         }
-
+    
     def get_resume_text(self) -> str:
         """Extract all text from resume data"""
         text_parts = []
@@ -504,9 +520,21 @@ class ResumeEditor:
         # Matched and Missing Keywords as horizontal chips with show more
         st.markdown("<style>\n.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }\n.chip { padding: 6px 14px; border-radius: 16px; font-size: 1rem; font-weight: 500; background: #e0f7fa; color: #006064; border: none; }\n.chip-missing { background: #ffebee; color: #b71c1c; }\n@media (prefers-color-scheme: dark) { .chip { background: #263238; color: #80deea; } .chip-missing { background: #311111; color: #ff8a80; } }\n</style>", unsafe_allow_html=True)
         
-        # Matched Keywords
-        matched_keywords = ats_results['matched_keywords']
-        missing_keywords = ats_results['missing_keywords']
+        matched_keywords = sorted(
+            ats_results['matched_keywords'], 
+            key=lambda x: x['weight'], 
+            reverse=True
+        )
+        missing_keywords = sorted(
+            ats_results['missing_keywords'], 
+            key=lambda x: x['weight'], 
+            reverse=True
+        )
+
+        # Now extract just the strings
+        matched_keywords = [kw['keyword'] for kw in matched_keywords]
+        missing_keywords = [kw['keyword'] for kw in missing_keywords]
+
         show_count = 10
         show_more_matched = st.session_state.get('show_more_matched', False)
         show_more_missing = st.session_state.get('show_more_missing', False)
@@ -548,7 +576,7 @@ class ResumeEditor:
         if ats_results['score'] < 60:
             st.warning("Your resume needs significant improvement for this position.")
             st.write("Consider adding these missing keywords to your resume:")
-            missing_keywords = ats_results['missing_keywords'][:10]  # Top 10
+            missing_keywords = missing_keywords[:10]  # Top 10
             if missing_keywords:
                 st.markdown('<div class="chip-row">' + ''.join([f'<span class="chip">{kw}</span>' for kw in missing_keywords]) + '</div>', unsafe_allow_html=True)
         elif ats_results['score'] < 80:

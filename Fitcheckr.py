@@ -1,12 +1,17 @@
 import streamlit as st
 import json
-import os
 from typing import Dict, List, Any
 import re
 from collections import Counter
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import spacy
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer, util
+import math
+import numpy as np
+import en_core_web_sm
 
 # Page configuration
 st.set_page_config(
@@ -183,7 +188,10 @@ class ResumeEditor:
             "Education": "edu.json",
             "Projects": "proj.json"
         }
-        
+
+        self.nlp = en_core_web_sm.load()
+        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    
     def load_json_from_session(self, section: str) -> List[Dict]:
         key = f"{section.lower().replace(' ', '_')}_data"
         return st.session_state.get(key, [])
@@ -299,73 +307,60 @@ class ResumeEditor:
         
         st.info("Uploaded data will be available for manual editing and ATS analysis.")
 
-    def extract_keywords(self, text: str) -> List[str]:
-        """Extract keywords from text"""
-        if not text:
-            return []
-        
-        # Remove special characters and convert to lowercase
-        text = re.sub(r'[^\w\s]', ' ', text.lower())
-        words = text.split()
-        
-        # Filter out common stop words
-        stop_words = {
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
-            'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-            'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-            'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those',
-            'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us',
-            'them', 'my', 'your', 'his', 'her', 'its', 'our', 'their', 'mine',
-            'yours', 'his', 'hers', 'ours', 'theirs', 'am', 'is', 'are', 'was',
-            'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does',
-            'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can'
-        }
-        
-        keywords = [word for word in words if word not in stop_words and len(word) > 2]
-        return keywords
-    
-    def calculate_ats_score(self, resume_text: str, job_description: str) -> Dict[str, Any]:
-        """Calculate ATS score based on keyword matching"""
+    def extract_keywords(self, text):
+        doc = self.nlp(text.lower())
+        keywords = set()
+
+        for chunk in doc.noun_chunks:
+            tok = chunk.root
+            if tok.pos_ in {"NOUN", "PROPN"} and len(chunk.text.strip()) > 2:
+                keywords.add(chunk.text.strip().lower())
+
+        for ent in doc.ents:
+            if ent.label_ in {"ORG", "PRODUCT", "GPE", "PERSON"}:
+                keywords.add(ent.text.strip().lower())
+
+        return list(keywords)
+
+    def get_tfidf_keywords(self, jd_text, top_n=30):
+        vec = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=300)
+        tfidf_matrix = vec.fit_transform([jd_text])
+        feature_names = vec.get_feature_names_out()
+        scores = tfidf_matrix.toarray().flatten()
+        top_indices = scores.argsort()[::-1][:top_n]
+        return [(feature_names[i], scores[i]) for i in top_indices]
+
+    def calculate_ats_score(self, resume_text, jd_text, threshold=0.75):
+        jd_keywords_weighted = self.get_tfidf_keywords(jd_text)
         resume_keywords = self.extract_keywords(resume_text)
-        job_keywords = self.extract_keywords(job_description)
-        
-        if not job_keywords:
-            return {
-                'score': 0,
-                'matched_keywords': [],
-                'missing_keywords': job_keywords,
-                'match_percentage': 0
-            }
-        
-        # Count keyword frequencies
-        resume_keyword_counts = Counter(resume_keywords)
-        job_keyword_counts = Counter(job_keywords)
-        
-        # Find matched and missing keywords
-        matched_keywords = []
-        missing_keywords = []
-        
-        for keyword, count in job_keyword_counts.items():
-            if keyword in resume_keyword_counts:
-                matched_keywords.extend([keyword] * min(count, resume_keyword_counts[keyword]))
+        resume_emb = self.embedder.encode(resume_keywords, convert_to_tensor=True)
+
+        matched = []
+        missing = []
+
+        for keyword, weight in jd_keywords_weighted:
+            kw_emb = self.embedder.encode(keyword, convert_to_tensor=True)
+            cos_scores = util.cos_sim(kw_emb, resume_emb)
+            max_score = cos_scores.max().item()  # ✅
+
+
+            if max_score >= threshold:
+                matched.append({"keyword": keyword, "score": round(max_score, 2), "weight": round(weight, 2)})
             else:
-                missing_keywords.extend([keyword] * count)
-        
-        # Calculate score
-        total_job_keywords = len(job_keywords)
-        matched_count = len(matched_keywords)
-        match_percentage = (matched_count / total_job_keywords) * 100
-        
-        # Score calculation (0-100)
-        score = min(100, match_percentage)
-        
+                missing.append({"keyword": keyword, "score": round(max_score, 2), "weight": round(weight, 2)})
+
+        total_weight = sum(weight for _, weight in jd_keywords_weighted)
+        matched_weight = sum(m['weight'] for m in matched)
+
+        score = (matched_weight / total_weight * 100) if total_weight else 0
+
         return {
-            'score': round(score, 1),
-            'matched_keywords': list(set(matched_keywords)),
-            'missing_keywords': list(set(missing_keywords)),
-            'match_percentage': round(match_percentage, 1),
-            'total_job_keywords': total_job_keywords,
-            'matched_count': matched_count
+            "score": round(score, 1),
+            "matched_keywords": matched,
+            "missing_keywords": missing,
+            "match_percentage": round(score, 1),
+            "total_keywords": len(jd_keywords_weighted),
+            "matched_count": len(matched)
         }
     
     def get_resume_text(self) -> str:
@@ -525,9 +520,21 @@ class ResumeEditor:
         # Matched and Missing Keywords as horizontal chips with show more
         st.markdown("<style>\n.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }\n.chip { padding: 6px 14px; border-radius: 16px; font-size: 1rem; font-weight: 500; background: #e0f7fa; color: #006064; border: none; }\n.chip-missing { background: #ffebee; color: #b71c1c; }\n@media (prefers-color-scheme: dark) { .chip { background: #263238; color: #80deea; } .chip-missing { background: #311111; color: #ff8a80; } }\n</style>", unsafe_allow_html=True)
         
-        # Matched Keywords
-        matched_keywords = ats_results['matched_keywords']
-        missing_keywords = ats_results['missing_keywords']
+        matched_keywords = sorted(
+            ats_results['matched_keywords'], 
+            key=lambda x: x['weight'], 
+            reverse=True
+        )
+        missing_keywords = sorted(
+            ats_results['missing_keywords'], 
+            key=lambda x: x['weight'], 
+            reverse=True
+        )
+
+        # Now extract just the strings
+        matched_keywords = [kw['keyword'] for kw in matched_keywords]
+        missing_keywords = [kw['keyword'] for kw in missing_keywords]
+
         show_count = 10
         show_more_matched = st.session_state.get('show_more_matched', False)
         show_more_missing = st.session_state.get('show_more_missing', False)
@@ -569,7 +576,7 @@ class ResumeEditor:
         if ats_results['score'] < 60:
             st.warning("Your resume needs significant improvement for this position.")
             st.write("Consider adding these missing keywords to your resume:")
-            missing_keywords = ats_results['missing_keywords'][:10]  # Top 10
+            missing_keywords = missing_keywords[:10]  # Top 10
             if missing_keywords:
                 st.markdown('<div class="chip-row">' + ''.join([f'<span class="chip">{kw}</span>' for kw in missing_keywords]) + '</div>', unsafe_allow_html=True)
         elif ats_results['score'] < 80:
@@ -1170,8 +1177,6 @@ class ResumeEditor:
         #     if 'projects' in st.session_state:
         #         del st.session_state['projects']
         #     st.rerun()
-    
-
     
     def display_formatted_data(self, section_name: str, data: List[Dict]):
         """Display formatted data based on section"""
